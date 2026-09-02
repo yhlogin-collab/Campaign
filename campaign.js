@@ -365,44 +365,46 @@
     tagAll(S.effective, 'cmp-hidden'); // "Effective Donation" only meant something while the match ran
     tagAll(S.submitBtn, 'cmp-submit');
     $$(S.form).forEach(function (form) {
-      if (form.getAttribute('data-cmp-wired')) return;
+      if ($('.cmp-freq', form)) { syncForm(form); return; } // already built (or a platform clone of a built form)
       var rec = $(S.recurring, form), submit = $(S.submitBtn, form);
       if (!rec || !submit) return; // markup differs: leave the form untouched
       var wrap = $(S.recurringWrap, form) || rec.closest('.checkbox') || rec.parentNode;
-      form.setAttribute('data-cmp-wired', '1');
-
       // Frequency toggle. Drives the platform's own checkbox; one-time stays the default.
-      var once = el('button', { 'class': 'cmp-freq-opt', type: 'button', 'aria-pressed': 'true' }, [
+      var once = el('button', { 'class': 'cmp-freq-opt', type: 'button', 'data-cmp-freq': 'once', 'aria-pressed': 'true' }, [
         'Give once', el('span', { 'class': 'cmp-freq-hint', text: 'A single gift today' })]);
-      var monthly = el('button', { 'class': 'cmp-freq-opt', type: 'button', 'aria-pressed': 'false' }, [
+      var monthly = el('button', { 'class': 'cmp-freq-opt', type: 'button', 'data-cmp-freq': 'monthly', 'aria-pressed': 'false' }, [
         'Give monthly', el('span', { 'class': 'cmp-freq-hint', text: 'Join the Chai Club' })]);
-      var toggle = el('div', { 'class': 'cmp-freq cmp-injected', role: 'group', 'aria-label': 'How often' }, [once, monthly]);
-      wrap.parentNode.insertBefore(toggle, wrap);
+      wrap.parentNode.insertBefore(el('div', { 'class': 'cmp-freq cmp-injected', role: 'group', 'aria-label': 'How often' }, [once, monthly]), wrap);
       wrap.classList.add('cmp-native-freq');
-      once.addEventListener('click', function () { setMonthly(form, false); sync(); });
-      monthly.addEventListener('click', function () { setMonthly(form, true); sync(); });
-
       // Loud confirmation whenever monthly is on.
-      var confirmBox = el('div', { 'class': 'cmp-confirm cmp-injected', role: 'status', hidden: '' });
-      submit.parentNode.insertBefore(confirmBox, submit);
-      function sync() {
-        var on = isMonthly(form);
-        once.setAttribute('aria-pressed', String(!on));
-        monthly.setAttribute('aria-pressed', String(on));
-        if (!on) { confirmBox.setAttribute('hidden', ''); return; }
-        var amt = currentAmount(form), plan = $(S.planPayments, form);
-        var months = plan && parseInt(plan.value, 10) > 1 ? parseInt(plan.value, 10) : null;
-        confirmBox.textContent = '';
-        confirmBox.appendChild(el('b', { text: amt ? money(amt) : 'Your gift' }));
-        confirmBox.appendChild(document.createTextNode(' every month' + (months ? ' for ' + months + ' months' : '') + '. First charge today. Cancel anytime.'));
-        confirmBox.removeAttribute('hidden');
-      }
-      form.addEventListener('change', sync);
-      form.addEventListener('input', sync);
-      form.addEventListener('click', function () { setTimeout(sync, 0); });
-      sync();
+      submit.parentNode.insertBefore(el('div', { 'class': 'cmp-confirm cmp-injected', role: 'status', hidden: '' }), submit);
+      syncForm(form);
     });
   }
+  function syncForm(form) {
+    var S = CONFIG.sel, on = isMonthly(form);
+    $$('.cmp-freq-opt', form).forEach(function (btn) { btn.setAttribute('aria-pressed', String((btn.getAttribute('data-cmp-freq') === 'monthly') === on)); });
+    var box = $('.cmp-confirm', form);
+    if (!box) return;
+    if (!on) { box.setAttribute('hidden', ''); return; }
+    var amt = currentAmount(form), plan = $(S.planPayments, form);
+    var months = plan && parseInt(plan.value, 10) > 1 ? parseInt(plan.value, 10) : null;
+    box.textContent = '';
+    box.appendChild(el('b', { text: amt ? money(amt) : 'Your gift' }));
+    box.appendChild(document.createTextNode(' every month' + (months ? ' for ' + months + ' months' : '') + '. First charge today. Cancel anytime.'));
+    box.removeAttribute('hidden');
+  }
+  // Delegated: the platform clones the form into its lightbox, and clones don't carry listeners.
+  document.addEventListener('click', function (e) {
+    if (!e.target || !e.target.closest) return;
+    var btn = e.target.closest('.cmp-freq-opt');
+    var form = e.target.closest(CONFIG.sel.form);
+    if (btn && form) { setMonthly(form, btn.getAttribute('data-cmp-freq') === 'monthly'); syncForm(form); return; }
+    if (form) setTimeout(function () { syncForm(form); }, 0);
+  });
+  ['change', 'input'].forEach(function (t) {
+    document.addEventListener(t, function (e) { var f = e.target && e.target.closest ? e.target.closest(CONFIG.sel.form) : null; if (f) syncForm(f); });
+  });
 
   // Runs before the platform's own submit handling (capture phase). Both the Donate button click and a
   // keyboard submit are covered; a form created after load is covered because this is delegated.
