@@ -74,8 +74,9 @@
     assetBase: 'PLACEHOLDER_ASSET_BASE',
     campaignEnd: '2026-09-20T18:00:00-05:00', // Sept 20, 2026, 6:00 pm Central (CDT)
     pollMs: 5000,
+    pipStyle: 'flame', // 'flame' (Lucide flame, fills gold as donors join) or 'chai' (the letters חי)
     // Feature flags. Mitzvah tracker + section ship off until that part of the campaign is ready.
-    features: { chai: true, mitzvah: false },
+    features: { chai: true, mitzvah: false, ticks: false },
     chaiGoalFallback: 50,
     mitzvahGoalFallback: 100
   };
@@ -174,7 +175,7 @@
       if (!p || p.closest('.cmp-injected, .fs-about-text') || !CONFIG.matchCopy.test(node.nodeValue)) continue;
       if (p.textContent.length < 200) p.classList.add('cmp-hidden');
     }
-    addChaiTicks(root);
+    if (CONFIG.features.ticks) addChaiTicks(root);
   }
 
   // A tick on the money bar every $18,000 — chai as the campaign's unit of measure.
@@ -201,7 +202,7 @@
   function buildDashboard(root) {
     var moneyEl = $(CONFIG.sel.money, root);
     dash = el('div', { 'class': 'cmp-dash cmp-injected cmp-hidden', 'aria-live': 'polite' });
-    trackers.chai = makeTracker('chai', 'Chai Club partners', 'Neighbors giving $18 a month, all year long.');
+    trackers.chai = makeTracker('chai', 'Chai Club goal: 50 monthly donors', 'Starting at $18 a month. Chai Club donors help us plan a whole year of programming and keep the lights on all year round.');
     trackers.mitzvah = makeTracker('mitzvah', 'Mitzvahs taken on', 'A class, a tzedakah box, a good deed. No gift required.');
     dash.appendChild(trackers.chai.el);
     dash.appendChild(trackers.mitzvah.el);
@@ -212,31 +213,28 @@
   function makeTracker(kind, title, sub) {
     var count = el('span', { 'class': 'cmp-tracker-count', text: '' });
     var of = el('span', { 'class': 'cmp-tracker-of', text: '' });
-    var pips = el('div', { 'class': 'cmp-pips cmp-pips--' + kind, 'aria-hidden': 'true' });
+    var fill = el('div', { 'class': 'cmp-tracker-fill' });
+    var bar = el('div', { 'class': 'cmp-tracker-bar', role: 'progressbar', 'aria-valuemin': '0' }, [fill]);
     var node = el('div', { 'class': 'cmp-tracker', 'data-kind': kind }, [
-      el('div', { 'class': 'cmp-tracker-figure' }, [count, of]),
-      el('div', { 'class': 'cmp-tracker-title', text: title }),
-      el('div', { 'class': 'cmp-tracker-sub', text: sub }),
-      pips
+      el('div', { 'class': 'container' }, [
+        el('div', { 'class': 'cmp-tracker-text' }, [
+          el('div', { 'class': 'cmp-tracker-title', text: title }),
+          el('div', { 'class': 'cmp-tracker-sub', text: sub })
+        ]),
+        el('div', { 'class': 'cmp-tracker-graph' }, [bar, el('div', { 'class': 'cmp-tracker-figure' }, [count, of])])
+      ])
     ]);
-    return { el: node, countEl: count, ofEl: of, pipsEl: pips, count: null, goal: null };
+    return { el: node, countEl: count, ofEl: of, barEl: bar, fillEl: fill, count: null, goal: null };
   }
 
   function renderTracker(t, count, goal) {
     if (t.count === count && t.goal === goal) return; // same value: no re-render, no motion
     var first = t.count === null;
-    if (t.goal !== goal) {
-      t.pipsEl.textContent = '';
-      for (var i = 0; i < goal; i++) t.pipsEl.appendChild(el('span', { 'class': 'cmp-pip' }));
-    }
-    var pips = t.pipsEl.children;
-    for (var j = 0; j < pips.length; j++) {
-      var on = j < count, was = first ? on : j < t.count;
-      pips[j].classList.toggle('cmp-pip--on', on);
-      pips[j].classList.toggle('cmp-pip--new', on && !was && !reducedMotion);
-    }
     t.countEl.textContent = String(count);
-    t.ofEl.textContent = 'of ' + goal;
+    t.ofEl.textContent = ' of ' + goal + ' monthly donors';
+    t.fillEl.style.width = Math.min(100, Math.round(count / goal * 100)) + '%';
+    t.barEl.setAttribute('aria-valuenow', String(count));
+    t.barEl.setAttribute('aria-valuemax', String(goal));
     t.el.setAttribute('aria-label', count + ' of ' + goal);
     if (!first && !reducedMotion) {
       t.countEl.classList.remove('cmp-tracker-count--bump');
@@ -246,7 +244,9 @@
     t.count = count; t.goal = goal;
   }
 
+  var latestProgress = null; // the nudge reads the live Chai Club count from here
   function applyProgress(p) {
+    latestProgress = p;
     var anyShown = false;
     [['chai', p.chaiCount, p.chaiGoal, CONFIG.chaiGoalFallback],
      ['mitzvah', p.mitzvahCount, p.mitzvahGoal, CONFIG.mitzvahGoalFallback]].forEach(function (row) {
@@ -333,7 +333,7 @@
   }
 
   /* ── 3 & 4. the lightbox: frequency toggle, monthly confirmation, nudge ─── */
-  var nudgeFired = false, bypassNudge = false;
+  var nudgeFired = false;
 
   // The platform's amount is a radio group; "Other" is a radio plus a number input.
   function currentAmount(form) {
@@ -406,43 +406,38 @@
     document.addEventListener(t, function (e) { var f = e.target && e.target.closest ? e.target.closest(CONFIG.sel.form) : null; if (f) syncForm(f); });
   });
 
-  // Runs before the platform's own submit handling (capture phase). Both the Donate button click and a
-  // keyboard submit are covered; a form created after load is covered because this is delegated.
-  function maybeNudge(e, form, submit) {
-    if (bypassNudge || nudgeFired || !form || isMonthly(form)) return;
-    if (form.checkValidity && !form.checkValidity()) return; // let the platform show its own errors first
+  // The nudge fires when the donor settles on a one-time amount — before any card details are typed —
+  // never on the Donate click, which the platform uses for fraud checks and card tokenization.
+  function maybeNudge(form) {
+    if (nudgeFired || !form || isMonthly(form)) return;
     var amount = currentAmount(form), monthlyAmt = monthlyFor(amount);
     if (!monthlyAmt) return;
-    e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
     nudgeFired = true;
-    openNudge(amount, monthlyAmt, submit, function accept() {
+    var returnTo = $(CONFIG.sel.recurringWrap, form) ? $('.cmp-freq-opt', form) : null;
+    openNudge(amount, monthlyAmt, returnTo, function accept() {
       setMonthly(form, true);
       var plan = $(CONFIG.sel.planPayments, form);
       if (plan && CONFIG.nudgePlanPayments) { plan.value = String(CONFIG.nudgePlanPayments); fire(plan, 'change'); }
       setAmount(form, monthlyAmt);
-      proceed(submit);
-    }, function decline() { proceed(submit); });
+      syncForm(form);
+    }, function decline() { /* keep the one-time gift exactly as entered */ });
   }
-  document.addEventListener('click', function (e) {
+  document.addEventListener('change', function (e) {
     try {
-      var btn = e.target && e.target.closest ? e.target.closest(CONFIG.sel.submitBtn) : null;
-      if (!btn) return;
-      maybeNudge(e, btn.closest(CONFIG.sel.form) || btn.form, btn);
-    } catch (err) { /* anything unexpected: let the gift go through untouched */ }
-  }, true);
-  document.addEventListener('submit', function (e) {
-    try {
-      var form = e.target;
-      if (!form || !form.matches || !form.matches(CONFIG.sel.form)) return;
-      maybeNudge(e, form, $(CONFIG.sel.submitBtn, form));
+      var t = e.target, S = CONFIG.sel;
+      if (!t || !t.closest || !t.matches(S.amountRadio) || t.matches(S.otherRadio)) return;
+      var form = t.closest(S.form);
+      if (form) setTimeout(function () { maybeNudge(form); }, 150); // let the platform mark the tier first
     } catch (err) { }
-  }, true);
-
-  function proceed(btn) {
-    bypassNudge = true;
-    try { if (btn) btn.click(); else { var f = $(CONFIG.sel.form); if (f) f.requestSubmit ? f.requestSubmit() : f.submit(); } }
-    finally { bypassNudge = false; }
-  }
+  });
+  document.addEventListener('focusout', function (e) {
+    try {
+      var t = e.target, S = CONFIG.sel;
+      if (!t || !t.matches || !t.matches(S.otherAmount)) return;
+      var form = t.closest(S.form);
+      if (form && parseAmount(t.value)) setTimeout(function () { maybeNudge(form); }, 150);
+    } catch (err) { }
+  });
 
   // The rule, not the table. Ladder rungs are the figures this community knows.
   var LADDER = [18, 25, 36, 54, 72, 100, 118, 144, 180];
@@ -459,13 +454,19 @@
   }
 
   function openNudge(amount, monthly, returnTo, onAccept, onDecline) {
-    var title = el('div', { 'class': 'cmp-modal-title', id: 'cmp-nudge-title', text: 'Would you make it monthly?' });
+    var p = latestProgress || {}, count = p.chaiCount, goal = p.chaiGoal || CONFIG.chaiGoalFallback;
+    var haveCount = typeof count === 'number' && count < goal;
+    var title = el('div', { 'class': 'cmp-modal-title', id: 'cmp-nudge-title' }, [
+      'Excuse the chutzpah.', el('span', { 'class': 'cmp-modal-kicker', text: 'Would you consider joining the Chai Club?' })]);
     var figure = el('div', { 'class': 'cmp-modal-figure' }, [money(monthly), el('small', { text: 'a month' })]);
-    var copy = el('p', { id: 'cmp-nudge-desc', text: 'Monthly support lets us plan a whole year of classes, holidays and Shabbat dinners in advance instead of raising it again next February. ' + money(monthly) + ' a month would do that.' });
-    var accept = el('button', { 'class': 'cmp-btn cmp-btn--primary cmp-btn--block', type: 'button', text: 'Give ' + money(monthly) + ' a month' });
-    var decline = el('button', { 'class': 'cmp-btn cmp-btn--secondary cmp-btn--block', type: 'button', text: 'Keep my ' + money(amount) + ' gift' });
+    // The count is live from the sheet; if it can't be read, the sentence about it is left out.
+    var copy = el('p', { id: 'cmp-nudge-desc', text: haveCount
+      ? 'We\u2019re at ' + count + ' of our goal of ' + goal + ' Chai Club members. Would you consider being number ' + (count + 1) + '?'
+      : 'Chai Club members give monthly, starting at $18, and help us plan a whole year of programming.' });
+    var decline = el('button', { 'class': 'cmp-btn cmp-btn--primary cmp-btn--block', type: 'button', text: 'Keep my ' + money(amount) + ' gift' });
+    var accept = el('button', { 'class': 'cmp-btn cmp-btn--secondary cmp-btn--block', type: 'button', text: 'Join the Chai Club at ' + money(monthly) + ' a month' });
     var modal = el('div', { 'class': 'cmp-modal', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'cmp-nudge-title', 'aria-describedby': 'cmp-nudge-desc' },
-      [title, figure, copy, el('div', { 'class': 'cmp-modal-actions' }, [accept, decline])]);
+      [title, figure, copy, el('div', { 'class': 'cmp-modal-actions' }, [decline, accept])]);
     var overlay = el('div', { 'class': 'cmp-overlay cmp-injected' }, [modal]);
     var previous = document.activeElement;
 
@@ -478,7 +479,7 @@
     function onKey(e) {
       if (e.key === 'Escape') { e.preventDefault(); close(onDecline); return; }
       if (e.key !== 'Tab') return;
-      var f = [accept, decline];
+      var f = [decline, accept];
       if (e.shiftKey && document.activeElement === f[0]) { e.preventDefault(); f[1].focus(); }
       else if (!e.shiftKey && document.activeElement === f[1]) { e.preventDefault(); f[0].focus(); }
       else if (!modal.contains(document.activeElement)) { e.preventDefault(); f[0].focus(); }
@@ -488,8 +489,11 @@
     overlay.addEventListener('click', function (e) { if (e.target === overlay) close(onDecline); });
     document.addEventListener('keydown', onKey, true);
     document.body.appendChild(overlay);
-    accept.focus();
+    decline.focus();
   }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
+})();
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();
