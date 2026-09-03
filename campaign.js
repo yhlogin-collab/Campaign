@@ -66,17 +66,23 @@
     // platform's hidden "number of payments" field (1 on the live form). 12 asks for a 12-month plan.
     // UNVERIFIED: confirm with one $1 test donation, or set to null to leave the platform's default.
     nudgePlanPayments: 12,
+    nudgeMin: 100, nudgeMax: 1800, // one-time gifts in this range get the nudge
+    // Test mode: open the campaign page with ?cmptest=1 → the nudge fires from $1 and proposes the same amount
+    // monthly, so a $1 gift can verify the 12-payment plan end to end. Nobody else is affected.
+    testMode: /[?&]cmptest=1/.test(location.search),
     matchCopy: /will be matched|will be doubled|matching funds|double in value/i,
     // Published Google Sheet (File → Share → Publish to web → CSV). Either layout works:
     //   row 1 headers / row 2 values   or   one "name,value" pair per row.
     dataUrl: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vTtLst8n1GMPTUoSolWBQ6p8oJXooWJAd664Hh-5aZdRtvosnjJWM3Eiq2G6q9IUPKbmbzcXQG2lqCX/pub?output=csv',
-    mitzvahForm: 'PLACEHOLDER_FORM_MITZVAH',
+    mitzvahForm: 'https://docs.google.com/forms/d/e/1FAIpQLSechY_cR0CuvtqJ_8dSnKjd2nMO8uvSFduF1nvZ1G8rC4RCLQ/viewform',
+    // Field ids from the form's "Get pre-filled link" (entry.NNNNNNN). Empty = open the form unfilled.
+    mitzvahEntries: { mitzvah: 'entry.1811438944', path: 'entry.1300651748' },
     assetBase: 'PLACEHOLDER_ASSET_BASE',
     campaignEnd: '2026-09-20T18:00:00-05:00', // Sept 20, 2026, 6:00 pm Central (CDT)
     pollMs: 5000,
     pipStyle: 'flame', // 'flame' (Lucide flame, fills gold as donors join) or 'chai' (the letters חי)
     // Feature flags. Mitzvah tracker + section ship off until that part of the campaign is ready.
-    features: { chai: true, mitzvah: false, ticks: false },
+    features: { chai: true, mitzvah: true, ticks: false },
     chaiGoalFallback: 50,
     mitzvahGoalFallback: 100
   };
@@ -202,15 +208,15 @@
   function buildDashboard(root) {
     var moneyEl = $(CONFIG.sel.money, root);
     dash = el('div', { 'class': 'cmp-dash cmp-injected cmp-hidden', 'aria-live': 'polite' });
-    trackers.chai = makeTracker('chai', 'Chai Club goal: 50 monthly donors', 'Starting at $18 a month. Chai Club donors help us plan a whole year of programming and keep the lights on all year round.');
-    trackers.mitzvah = makeTracker('mitzvah', 'Mitzvahs taken on', 'A class, a tzedakah box, a good deed. No gift required.');
+    trackers.chai = makeTracker('chai', 'Chai Club goal: 50 members', 'Help us reach our goal of 50 monthly donors and keep the lights on all year round. Chai Club starts at $18/mo, and your full year of giving counts toward the $100,000 goal today.', 'members');
+    trackers.mitzvah = makeTracker('mitzvah', 'Goal: 100 mitzvahs', '', 'mitzvahs');
     dash.appendChild(trackers.chai.el);
     dash.appendChild(trackers.mitzvah.el);
     if (moneyEl && moneyEl.parentNode) moneyEl.parentNode.insertBefore(dash, moneyEl.nextSibling);
     else { dash.classList.add('cmp-dash--alone'); var h = $(CONFIG.sel.header, root); if (h) h.parentNode.insertBefore(dash, h.nextSibling); else root.insertBefore(dash, root.firstChild); }
   }
 
-  function makeTracker(kind, title, sub) {
+  function makeTracker(kind, title, sub, unit) {
     var count = el('span', { 'class': 'cmp-tracker-count', text: '' });
     var of = el('span', { 'class': 'cmp-tracker-of', text: '' });
     var fill = el('div', { 'class': 'cmp-tracker-fill' });
@@ -224,15 +230,16 @@
         el('div', { 'class': 'cmp-tracker-graph' }, [bar, el('div', { 'class': 'cmp-tracker-figure' }, [count, of])])
       ])
     ]);
-    return { el: node, countEl: count, ofEl: of, barEl: bar, fillEl: fill, count: null, goal: null };
+    return { el: node, countEl: count, ofEl: of, barEl: bar, fillEl: fill, unit: unit || '', count: null, goal: null };
   }
 
   function renderTracker(t, count, goal) {
     if (t.count === count && t.goal === goal) return; // same value: no re-render, no motion
     var first = t.count === null;
     t.countEl.textContent = String(count);
-    t.ofEl.textContent = ' of ' + goal + ' monthly donors';
-    t.fillEl.style.width = Math.min(100, Math.round(count / goal * 100)) + '%';
+    t.ofEl.textContent = ' of ' + goal + (t.unit ? ' ' + t.unit : '');
+    t.el.style.setProperty('--cmp-pct', Math.min(100, count / goal * 100) + '%');
+    t.barEl.style.setProperty('--cmp-seg', (100 / goal) + '%'); // one cell per member
     t.barEl.setAttribute('aria-valuenow', String(count));
     t.barEl.setAttribute('aria-valuemax', String(goal));
     t.el.setAttribute('aria-label', count + ' of ' + goal);
@@ -256,7 +263,8 @@
       renderTracker(t, count, goal);
       anyShown = true;
     });
-    dash.classList.toggle('cmp-hidden', !anyShown);
+    var inDash = Object.keys(trackers).some(function (k) { return trackers[k].el.parentNode === dash && !trackers[k].el.classList.contains('cmp-hidden'); });
+    dash.classList.toggle('cmp-hidden', !inDash);
   }
   function hideTrackers() { if (dash) dash.classList.add('cmp-hidden'); }
 
@@ -285,7 +293,11 @@
   }
 
   var pollTimer = null;
-  function poll() { getProgress().then(function (p) { try { document.dispatchEvent(new CustomEvent('cmp:progress', { detail: p })); } catch (e) {} applyProgress(p); }, hideTrackers); }
+  var lastGood = null;
+  function poll() { getProgress().then(function (p) {
+      var empty = p.chaiCount === null && p.mitzvahCount === null;
+      if (empty && lastGood) p = lastGood;          // unrecognizable feed (e.g. wrong tab published): keep the last good numbers
+      else if (!empty) lastGood = p; try { document.dispatchEvent(new CustomEvent('cmp:progress', { detail: p })); } catch (e) {} applyProgress(p); }, function () { if (!lastGood) hideTrackers(); }); }
   function startPolling() {
     if (pollTimer) return;
     poll();
@@ -298,17 +310,18 @@
 
   /* ── 5. mitzvah section ─────────────────────────────────────────────────── */
   function buildMitzvah(root) {
-    var link = CONFIG.mitzvahForm + '?src=page';
     var options = [
-      { title: 'Torah study', desc: 'Twenty minutes a week that stays with you.', paths: ['Join one of our classes', 'Host a class in your home', 'Get the daily study app'] },
-      { title: 'Tzedakah', desc: 'Give a little, often, to a cause you choose.', paths: ['We bring a tzedakah box to your home, you fill it and give to the charity of your choice', 'Give through the Colel Chabad app'] },
-      { title: 'Third mitzvah', desc: 'A short line on what this one is and why it matters.', placeholder: true, paths: ['First way to take this on', 'Second way to take this on', 'Third way to take this on'] }
+      { title: 'Torah study', formValue: 'Torah Study', desc: 'Join a class, learn online, or buy a Jewish book.', paths: ['Join one of our classes', 'Learn online', 'Buy a Jewish book'] },
+      { title: 'Tzedakah', desc: 'Give a little, often, to a cause you choose.', paths: ['Tzedakah box for my home', 'Give daily with the awesome Colel Chabad app'] },
+      { title: 'Mezuzah', desc: 'Get a mezuzah for your doorway or check the one you have to make sure it\u2019s kosher.', paths: ['Get a mezuzah for my home', 'Have my mezuzahs checked'] }
     ];
     var grid = el('div', { 'class': 'cmp-options' });
     options.forEach(function (o, i) {
       var listId = 'cmp-paths-' + i;
       var list = el('ul', { 'class': 'cmp-paths', id: listId, hidden: '' }, o.paths.map(function (p) {
-        return el('li', null, [el('a', { 'class': 'cmp-path', href: link, text: p })]);
+        var btn = el('button', { 'class': 'cmp-path', type: 'button', text: p });
+        btn.addEventListener('click', function () { openMitzvahForm(o.formValue || o.title, p, btn); });
+        return el('li', null, [btn]);
       }));
       var toggle = el('button', { 'class': 'cmp-btn cmp-btn--secondary cmp-option-toggle', type: 'button', 'aria-expanded': 'false', 'aria-controls': listId, text: 'See how' });
       toggle.addEventListener('click', function () {
@@ -317,19 +330,40 @@
         toggle.textContent = open ? 'See how' : 'Close';
         if (open) list.setAttribute('hidden', ''); else list.removeAttribute('hidden');
       });
-      var title = el('div', { 'class': 'cmp-option-title', text: o.title });
-      if (o.placeholder) title.appendChild(el('span', { 'class': 'cmp-placeholder-mark', text: 'placeholder' }));
-      var opt = el('div', { 'class': 'cmp-option' }, [title, el('p', { 'class': 'cmp-option-desc', text: o.desc }), toggle, list]);
-      if (o.placeholder) opt.setAttribute('data-cmp-placeholder', 'third-mitzvah');
-      grid.appendChild(opt);
+      grid.appendChild(el('div', { 'class': 'cmp-option' }, [
+        el('div', { 'class': 'cmp-option-title', text: o.title }), el('p', { 'class': 'cmp-option-desc', text: o.desc }), toggle, list]));
     });
+    var own = el('button', { 'class': 'cmp-own', type: 'button', text: 'Have a different mitzvah in mind? Add your own' });
+    own.addEventListener('click', function () { openMitzvahForm('Other', '', own); });
+    var side = trackers.mitzvah.el;
+    side.classList.add('cmp-tracker--vertical');
     var section = el('div', { 'class': 'cmp-mitzvah cmp-injected' }, [
-      el('div', { 'class': 'cmp-mitzvah-title', text: 'Take on a mitzvah' }),
-      el('p', { 'class': 'cmp-mitzvah-lede', text: 'Not everything we are asking for is money. Pick one of these and we will follow up with you. It counts toward the hundred either way.' }),
-      grid
+      el('div', { 'class': 'cmp-mitzvah-title', text: 'Take on a mitzvah for the New Year' }),
+      el('p', { 'class': 'cmp-mitzvah-lede', text: 'Choose a mitzvah in one of these categories or add your own.' }),
+      el('div', { 'class': 'cmp-mitzvah-body' }, [side, el('div', { 'class': 'cmp-options-wrap' }, [grid, own])])
     ]);
     var wall = $(CONFIG.sel.wallSection, root);
     if (wall && wall.parentNode) wall.parentNode.insertBefore(section, wall); else root.appendChild(section);
+  }
+
+  // The Google Form opens in a lightbox on the page, mitzvah and path pre-selected when the field ids are set.
+  function openMitzvahForm(mitzvah, path, returnTo) {
+    var E = CONFIG.mitzvahEntries, q = ['embedded=true', 'usp=pp_url'];
+    // "Other" is a free-text choice: Google pre-fills it as __other_option__ plus the typed text
+    if (E.mitzvah && mitzvah === 'Other') q.push(E.mitzvah + '=__other_option__', E.mitzvah + '.other_option_response=');
+    else if (E.mitzvah && mitzvah) q.push(E.mitzvah + '=' + encodeURIComponent(mitzvah));
+    if (E.path && path) q.push(E.path + '=' + encodeURIComponent(path));
+    var frame = el('iframe', { 'class': 'cmp-form-frame', src: CONFIG.mitzvahForm + '?' + q.join('&'), title: 'Mitzvah pledge form' });
+    var close = el('button', { 'class': 'cmp-form-close', type: 'button', 'aria-label': 'Close', text: '\u00D7' });
+    var modal = el('div', { 'class': 'cmp-form-modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Take on a mitzvah' }, [close, frame]);
+    var overlay = el('div', { 'class': 'cmp-overlay cmp-overlay--form cmp-injected' }, [modal]);
+    function shut() { document.removeEventListener('keydown', onKey, true); overlay.remove(); if (returnTo && returnTo.focus) returnTo.focus(); }
+    function onKey(e) { if (e.key === 'Escape') { e.preventDefault(); shut(); } }
+    close.addEventListener('click', shut);
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) shut(); });
+    document.addEventListener('keydown', onKey, true);
+    document.body.appendChild(overlay);
+    close.focus();
   }
 
   /* ── 3 & 4. the lightbox: frequency toggle, monthly confirmation, nudge ─── */
@@ -442,7 +476,9 @@
   // The rule, not the table. Ladder rungs are the figures this community knows.
   var LADDER = [18, 25, 36, 54, 72, 100, 118, 144, 180];
   function monthlyFor(amount) {
-    if (amount === null || amount < 100 || amount > 1800) return null;
+    if (amount === null) return null;
+    if (CONFIG.testMode) return amount >= 1 ? Math.round(amount) : null;
+    if (amount < CONFIG.nudgeMin || amount > CONFIG.nudgeMax) return null;
     var target = amount / 8, i = 0;
     for (var j = 1; j < LADDER.length; j++) {
       if (Math.abs(LADDER[j] - target) <= Math.abs(LADDER[i] - target)) i = j; // ties round up
@@ -464,7 +500,8 @@
       ? 'We\u2019re at ' + count + ' of our goal of ' + goal + ' Chai Club members. Would you consider being number ' + (count + 1) + '?'
       : 'Chai Club members give monthly, starting at $18, and help us plan a whole year of programming.' });
     var decline = el('button', { 'class': 'cmp-btn cmp-btn--primary cmp-btn--block', type: 'button', text: 'Keep my ' + money(amount) + ' gift' });
-    var accept = el('button', { 'class': 'cmp-btn cmp-btn--secondary cmp-btn--block', type: 'button', text: 'Join the Chai Club at ' + money(monthly) + ' a month' });
+    var accept = el('button', { 'class': 'cmp-btn cmp-btn--secondary cmp-btn--block', type: 'button' }, [
+      'Join the Chai Club at ' + money(monthly) + ' a month', el('span', { 'class': 'cmp-btn-hint', text: 'or any amount you choose' })]);
     var modal = el('div', { 'class': 'cmp-modal', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'cmp-nudge-title', 'aria-describedby': 'cmp-nudge-desc' },
       [title, figure, copy, el('div', { 'class': 'cmp-modal-actions' }, [decline, accept])]);
     var overlay = el('div', { 'class': 'cmp-overlay cmp-injected' }, [modal]);
