@@ -60,6 +60,9 @@
       recurringWrap: 'sites-recurring-options',
       recurring: '#inputRecurring',
       planPayments: '#planRecurrencesField, [name="plan_payments"], sites-recurring-options select, select[name*="plan" i], select[name*="recurr" i], select[name*="payments" i]',
+      // The form comes in two flavors: a "monthly donation" checkbox + hidden payments field, or (limited recurring)
+      // a single dropdown "Not recurring / 2..12 months". Both are handled; the dropdown wins when present.
+      planSelect: 'sites-recurring-options select, select[name="plan_payments"], select#planRecurrencesField, select[name*="recurr" i]',
       planType: 'input[name*="recurrence" i], input[name*="plan_type" i], input[name*="plantype" i]',
       submitBtn: '.fs-btn-donate'
     },
@@ -67,7 +70,7 @@
     // so the page fills the plan in itself whenever monthly is on: this many payments, plan type from the form's
     // own data-recurrence-type. Also used in the wording of the confirmation box.
     monthlyMonths: 12,
-    showNativeRecurring: true, // keep the platform's own "monthly donation" checkbox visible under our toggle (verifies it ticks)
+    showNativeRecurring: false, // hide the platform's own recurring control (checkbox or 2–12 dropdown); our toggle drives it and always means 12 months
     nudgeMin: 100, nudgeMax: 1800, // one-time gifts in this range get the nudge
     // Test mode: open the campaign page with ?cmptest=1 → the nudge fires from $1 and proposes the same amount
     // monthly, so a $1 gift can verify the 12-payment plan end to end. Nobody else is affected.
@@ -403,25 +406,43 @@
     input.value = String(n);
     ['input', 'change', 'keyup'].forEach(function (t) { fire(input, t); });
   }
-  function isMonthly(form) { var r = $(CONFIG.sel.recurring, form); return !!(r && r.checked); }
-  // The checkbox lives inside the platform's <sites-recurring-options> component, which may rebuild it after load.
-  // Query fresh every time, click it, and if that didn't take, set it directly and fire every event they might listen for.
+  function planSelect(form) { return $(CONFIG.sel.planSelect, form); }
+  function selectIsOn(sel) { return !!sel && parseInt(sel.value, 10) > 1; }
+  function pickOption(sel, on) {
+    var opts = Array.prototype.slice.call(sel.options), want = String(CONFIG.monthlyMonths);
+    if (on) return opts.filter(function (o) { return o.value === want || /^\s*12\b/.test(o.text); })[0]
+             || opts.filter(function (o) { return parseInt(o.value, 10) > 1; }).pop(); // no 12 offered: the longest plan there is
+    return opts.filter(function (o) { return /not recurring|one[- ]time|once/i.test(o.text) || o.value === '1' || o.value === '0' || o.value === ''; })[0] || opts[0];
+  }
+  function isMonthly(form) {
+    var sel = planSelect(form);
+    if (sel) return selectIsOn(sel);
+    var r = $(CONFIG.sel.recurring, form); return !!(r && r.checked);
+  }
   function setMonthly(form, on) {
+    var sel = planSelect(form);
+    if (sel) {
+      var pick = pickOption(sel, on);
+      if (pick && sel.value !== pick.value) { sel.value = pick.value; fire(sel, 'change'); fire(sel, 'input'); if (window.jQuery) { try { window.jQuery(sel).trigger('change'); } catch (e) {} } }
+      return;
+    }
+    // Checkbox flavor. It lives inside the platform's <sites-recurring-options> component, which may rebuild it after load.
     var r = $(CONFIG.sel.recurring, form);
     if (!r || r.checked === on) return;
     var label = r.id ? $('label[for="' + r.id + '"]', form) : null;
-    if (label) label.click(); else r.click(); // the label is the path a real tap takes, so the platform's own reveal runs
-    r = $(CONFIG.sel.recurring, form) || r;    // the platform may rebuild the control on change
+    if (label) label.click(); else r.click();
+    r = $(CONFIG.sel.recurring, form) || r;
     if (r.checked !== on) {
       r.checked = on;
       ['click', 'input', 'change'].forEach(function (t) { fire(r, t); });
     }
     if (window.jQuery) { try { window.jQuery(r).trigger('change'); } catch (e) {} }
     applyPlan(form);
-    setTimeout(function () { applyPlan(form); }, 50); // again once the platform has revealed its payments dropdown
+    setTimeout(function () { applyPlan(form); }, 50);
   }
   // Keep the plan fields (hidden input and/or the 2–12 dropdown) in step with the checkbox, whichever control the donor used.
   function applyPlan(form) {
+    if (planSelect(form)) return; // dropdown flavor: the donor's (or our) pick is the plan
     var on = isMonthly(form), S = CONFIG.sel;
     $$(S.planPayments, form).forEach(function (p) {
       var want = on ? String(CONFIG.monthlyMonths) : '1';
@@ -449,21 +470,30 @@
     tagAll(S.effective, 'cmp-hidden'); // "Effective Donation" only meant something while the match ran
     tagAll(S.submitBtn, 'cmp-submit');
     $$(S.form).forEach(function (form) {
-      if ($('.cmp-freq', form)) { syncForm(form); return; } // already built (or a platform clone of a built form)
-      var rec = $(S.recurring, form), submit = $(S.submitBtn, form);
+      if ($('.cmp-freq', form)) { hideNative(form); syncForm(form); return; } // already built (or a platform clone of a built form)
+      var rec = $(S.recurring, form) || planSelect(form), submit = $(S.submitBtn, form);
       if (!rec || !submit) return; // markup differs: leave the form untouched
-      var wrap = $(S.recurringWrap, form) || rec.closest('.checkbox') || rec.parentNode;
+      var wrap = $(S.recurringWrap, form) || rec.closest('.checkbox, .form-group') || rec.parentNode;
+      hideNative(form);
       // Frequency toggle. Drives the platform's own checkbox; one-time stays the default.
       var once = el('button', { 'class': 'cmp-freq-opt', type: 'button', 'data-cmp-freq': 'once', 'aria-pressed': 'true' }, [
         'Give once', el('span', { 'class': 'cmp-freq-hint', text: 'A single gift today' })]);
       var monthly = el('button', { 'class': 'cmp-freq-opt', type: 'button', 'data-cmp-freq': 'monthly', 'aria-pressed': 'false' }, [
         'Give monthly', el('span', { 'class': 'cmp-freq-hint', text: 'Join the Chai Club' })]);
       wrap.parentNode.insertBefore(el('div', { 'class': 'cmp-freq cmp-injected', role: 'group', 'aria-label': 'How often' }, [once, monthly]), wrap);
-      if (!CONFIG.showNativeRecurring) wrap.classList.add('cmp-native-freq');
       // Loud confirmation whenever monthly is on.
       submit.parentNode.insertBefore(el('div', { 'class': 'cmp-confirm cmp-injected', role: 'status', hidden: '' }), submit);
       syncForm(form);
     });
+  }
+  // Hide the platform's recurring control(s), whichever flavor rendered (and again if it gets rebuilt);
+  // our toggle is the only way to set the plan, and it always means 12 months.
+  function hideNative(form) {
+    if (CONFIG.showNativeRecurring) return;
+    var S = CONFIG.sel, nodes = [$(S.recurringWrap, form)];
+    var r = $(S.recurring, form); if (r) nodes.push(r.closest('.checkbox, .form-group'));
+    var sel = planSelect(form); if (sel) nodes.push(sel.closest('.form-group, .checkbox') || sel.parentNode);
+    nodes.forEach(function (n) { if (n && !n.classList.contains('cmp-native-freq')) n.classList.add('cmp-native-freq'); });
   }
   function syncForm(form) {
     var S = CONFIG.sel, on = isMonthly(form);
@@ -471,7 +501,7 @@
     var box = $('.cmp-confirm', form);
     if (!box) return;
     if (!on) { box.setAttribute('hidden', ''); return; }
-    var amt = currentAmount(form), months = CONFIG.monthlyMonths;
+    var sel = planSelect(form), amt = currentAmount(form), months = sel ? parseInt(sel.value, 10) : CONFIG.monthlyMonths;
     box.textContent = '';
     box.appendChild(el('b', { text: amt ? money(amt) : 'Your gift' }));
     box.appendChild(document.createTextNode(' every month' + (months ? ' for ' + months + ' months' : '') + '. First charge today. Cancel anytime.'));
