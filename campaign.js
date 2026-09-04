@@ -59,13 +59,11 @@
       effective: '.fs-effective-donation-container',
       recurringWrap: 'sites-recurring-options',
       recurring: '#inputRecurring',
-      planPayments: '#planRecurrencesField',
       submitBtn: '.fs-btn-donate'
     },
-    // When the donor accepts the nudge we tick the monthly box and set the amount. plan_payments is the
-    // platform's hidden "number of payments" field (1 on the live form). 12 asks for a 12-month plan.
-    // UNVERIFIED: confirm with one $1 test donation, or set to null to leave the platform's default.
-    nudgePlanPayments: 12,
+    // The length of a monthly plan is the campaign's own setting (recurring for a year). The page never writes
+    // plan_payments; this number is used only in the wording of the confirmation box.
+    monthlyMonths: 12,
     nudgeMin: 100, nudgeMax: 1800, // one-time gifts in this range get the nudge
     // Test mode: open the campaign page with ?cmptest=1 → the nudge fires from $1 and proposes the same amount
     // monthly, so a $1 gift can verify the 12-payment plan end to end. Nobody else is affected.
@@ -83,7 +81,7 @@
     pipStyle: 'flame', // 'flame' (Lucide flame, fills gold as donors join) or 'chai' (the letters חי)
     // Feature flags. Mitzvah tracker + section ship off until that part of the campaign is ready.
     features: { chai: true, mitzvah: true, ticks: false },
-    chaiGoalFallback: 50,
+    chaiGoalFallback: 36,
     mitzvahGoalFallback: 100
   };
   if (window.CMP_CONFIG) {
@@ -208,8 +206,8 @@
   function buildDashboard(root) {
     var moneyEl = $(CONFIG.sel.money, root);
     dash = el('div', { 'class': 'cmp-dash cmp-injected cmp-hidden', 'aria-live': 'polite' });
-    trackers.chai = makeTracker('chai', 'Chai Club goal: 50 members', 'Help us reach our goal of 50 monthly donors and keep the lights on all year round. Chai Club starts at $18/mo, and your full year of giving counts toward the $100,000 goal today.', 'members');
-    trackers.mitzvah = makeTracker('mitzvah', 'Goal: 100 mitzvahs', '', 'mitzvahs');
+    trackers.chai = makeTracker('chai', 'Goal: 36 new Chai Club partners', 'Help us reach our goal of 36 new monthly partners and keep the lights on all year round. Chai Club starts at $18/mo, and your full year of giving counts toward the $100,000 goal today.', 'new Chai partners');
+    trackers.mitzvah = makeTracker('mitzvah', 'Goal: 100 people', '', 'people have taken on a mitzvah');
     dash.appendChild(trackers.chai.el);
     dash.appendChild(trackers.mitzvah.el);
     if (moneyEl && moneyEl.parentNode) moneyEl.parentNode.insertBefore(dash, moneyEl.nextSibling);
@@ -222,7 +220,7 @@
     var fill = el('div', { 'class': 'cmp-tracker-fill' });
     var bar = el('div', { 'class': 'cmp-tracker-bar', role: 'progressbar', 'aria-valuemin': '0' }, [fill]);
     var node = el('div', { 'class': 'cmp-tracker', 'data-kind': kind }, [
-      el('div', { 'class': 'container' }, [
+      el('div', { 'class': 'container cmp-tracker-inner' }, [
         el('div', { 'class': 'cmp-tracker-text' }, [
           el('div', { 'class': 'cmp-tracker-title', text: title }),
           el('div', { 'class': 'cmp-tracker-sub', text: sub })
@@ -337,11 +335,12 @@
     own.addEventListener('click', function () { openMitzvahForm('Other', '', own); });
     var side = trackers.mitzvah.el;
     side.classList.add('cmp-tracker--vertical');
-    var section = el('div', { 'class': 'cmp-mitzvah cmp-injected' }, [
+    $('.cmp-tracker-inner', side).classList.remove('container'); // Bootstrap's .container would size and center it over the cards
+    var section = el('div', { 'class': 'cmp-mitzvah cmp-injected' }, [el('div', { 'class': 'container' }, [
       el('div', { 'class': 'cmp-mitzvah-title', text: 'Take on a mitzvah for the New Year' }),
       el('p', { 'class': 'cmp-mitzvah-lede', text: 'Choose a mitzvah in one of these categories or add your own.' }),
       el('div', { 'class': 'cmp-mitzvah-body' }, [side, el('div', { 'class': 'cmp-options-wrap' }, [grid, own])])
-    ]);
+    ])]);
     var wall = $(CONFIG.sel.wallSection, root);
     if (wall && wall.parentNode) wall.parentNode.insertBefore(section, wall); else root.appendChild(section);
   }
@@ -421,8 +420,7 @@
     var box = $('.cmp-confirm', form);
     if (!box) return;
     if (!on) { box.setAttribute('hidden', ''); return; }
-    var amt = currentAmount(form), plan = $(S.planPayments, form);
-    var months = plan && parseInt(plan.value, 10) > 1 ? parseInt(plan.value, 10) : null;
+    var amt = currentAmount(form), months = CONFIG.monthlyMonths;
     box.textContent = '';
     box.appendChild(el('b', { text: amt ? money(amt) : 'Your gift' }));
     box.appendChild(document.createTextNode(' every month' + (months ? ' for ' + months + ' months' : '') + '. First charge today. Cancel anytime.'));
@@ -450,8 +448,6 @@
     var returnTo = $(CONFIG.sel.recurringWrap, form) ? $('.cmp-freq-opt', form) : null;
     openNudge(amount, monthlyAmt, returnTo, function accept() {
       setMonthly(form, true);
-      var plan = $(CONFIG.sel.planPayments, form);
-      if (plan && CONFIG.nudgePlanPayments) { plan.value = String(CONFIG.nudgePlanPayments); fire(plan, 'change'); }
       setAmount(form, monthlyAmt);
       syncForm(form);
     }, function decline() { /* keep the one-time gift exactly as entered */ });
@@ -497,8 +493,8 @@
     var figure = el('div', { 'class': 'cmp-modal-figure' }, [money(monthly), el('small', { text: 'a month' })]);
     // The count is live from the sheet; if it can't be read, the sentence about it is left out.
     var copy = el('p', { id: 'cmp-nudge-desc', text: haveCount
-      ? 'We\u2019re at ' + count + ' of our goal of ' + goal + ' Chai Club members. Would you consider being number ' + (count + 1) + '?'
-      : 'Chai Club members give monthly, starting at $18, and help us plan a whole year of programming.' });
+      ? 'We\u2019re at ' + count + ' of our goal of ' + goal + ' new Chai Club partners. Would you consider being number ' + (count + 1) + '?'
+      : 'Chai Club partners give monthly, starting at $18, and help us plan a whole year of programming.' });
     var decline = el('button', { 'class': 'cmp-btn cmp-btn--primary cmp-btn--block', type: 'button', text: 'Keep my ' + money(amount) + ' gift' });
     var accept = el('button', { 'class': 'cmp-btn cmp-btn--secondary cmp-btn--block', type: 'button' }, [
       'Join the Chai Club at ' + money(monthly) + ' a month', el('span', { 'class': 'cmp-btn-hint', text: 'or any amount you choose' })]);
