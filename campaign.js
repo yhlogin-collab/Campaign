@@ -59,7 +59,7 @@
       effective: '.fs-effective-donation-container',
       recurringWrap: 'sites-recurring-options',
       recurring: '#inputRecurring',
-      planPayments: '#planRecurrencesField, input[name="plan_payments"]',
+      planPayments: '#planRecurrencesField, [name="plan_payments"], sites-recurring-options select, select[name*="plan" i], select[name*="recurr" i], select[name*="payments" i]',
       planType: 'input[name*="recurrence" i], input[name*="plan_type" i], input[name*="plantype" i]',
       submitBtn: '.fs-btn-donate'
     },
@@ -409,19 +409,30 @@
   function setMonthly(form, on) {
     var r = $(CONFIG.sel.recurring, form);
     if (!r || r.checked === on) return;
-    r.click();
+    var label = r.id ? $('label[for="' + r.id + '"]', form) : null;
+    if (label) label.click(); else r.click(); // the label is the path a real tap takes, so the platform's own reveal runs
+    r = $(CONFIG.sel.recurring, form) || r;    // the platform may rebuild the control on change
     if (r.checked !== on) {
       r.checked = on;
       ['click', 'input', 'change'].forEach(function (t) { fire(r, t); });
     }
     if (window.jQuery) { try { window.jQuery(r).trigger('change'); } catch (e) {} }
     applyPlan(form);
+    setTimeout(function () { applyPlan(form); }, 50); // again once the platform has revealed its payments dropdown
   }
-  // Keep the hidden plan fields in step with the checkbox (also when the donor ticks the platform's own box).
+  // Keep the plan fields (hidden input and/or the 2–12 dropdown) in step with the checkbox, whichever control the donor used.
   function applyPlan(form) {
     var on = isMonthly(form), S = CONFIG.sel;
     $$(S.planPayments, form).forEach(function (p) {
       var want = on ? String(CONFIG.monthlyMonths) : '1';
+      if (p.tagName === 'SELECT') {
+        var opts = Array.prototype.slice.call(p.options), pick = null;
+        if (on) { pick = opts.filter(function (o) { return o.value === want || o.text.trim() === want; })[0]
+                    || opts.filter(function (o) { return parseInt(o.value, 10) > 1; }).pop(); } // no 12: take the longest plan offered
+        else pick = opts.filter(function (o) { return o.value === '1'; })[0];
+        if (pick && p.value !== pick.value) { p.value = pick.value; fire(p, 'change'); fire(p, 'input'); }
+        return;
+      }
       if (p.value !== want) { p.value = want; fire(p, 'change'); }
     });
     var type = form.getAttribute('data-recurrence-type');
