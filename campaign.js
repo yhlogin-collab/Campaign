@@ -59,11 +59,15 @@
       effective: '.fs-effective-donation-container',
       recurringWrap: 'sites-recurring-options',
       recurring: '#inputRecurring',
+      planPayments: '#planRecurrencesField, input[name="plan_payments"]',
+      planType: 'input[name*="recurrence" i], input[name*="plan_type" i], input[name*="plantype" i]',
       submitBtn: '.fs-btn-donate'
     },
-    // The length of a monthly plan is the campaign's own setting (recurring for a year). The page never writes
-    // plan_payments; this number is used only in the wording of the confirmation box.
+    // A $1 test showed the platform submits "plan payments: 1, plan type: not set" when the monthly box is ticked,
+    // so the page fills the plan in itself whenever monthly is on: this many payments, plan type from the form's
+    // own data-recurrence-type. Also used in the wording of the confirmation box.
     monthlyMonths: 12,
+    showNativeRecurring: true, // keep the platform's own "monthly donation" checkbox visible under our toggle (verifies it ticks)
     nudgeMin: 100, nudgeMax: 1800, // one-time gifts in this range get the nudge
     // Test mode: open the campaign page with ?cmptest=1 → the nudge fires from $1 and proposes the same amount
     // monthly, so a $1 gift can verify the 12-payment plan end to end. Nobody else is affected.
@@ -112,6 +116,7 @@
 
   /* ── page detection ─────────────────────────────────────────────────────── */
   function init() {
+    if (/cmpoff/.test(location.hash)) return; // add #cmpoff to the URL to see the page without this layer
     var root = $(CONFIG.sel.root);
     if (!root && !CONFIG.pagePath.test(location.pathname)) return;
     root = root || $('main') || document.body;
@@ -207,7 +212,7 @@
     var moneyEl = $(CONFIG.sel.money, root);
     dash = el('div', { 'class': 'cmp-dash cmp-injected cmp-hidden', 'aria-live': 'polite' });
     trackers.chai = makeTracker('chai', 'Goal: 36 new Chai Club partners', 'Help us reach our goal of 36 new monthly partners and keep the lights on all year round. Chai Club starts at $18/mo, and your full year of giving counts toward the $100,000 goal today.', 'new Chai partners');
-    trackers.mitzvah = makeTracker('mitzvah', 'Goal: 100 people', '', 'people have taken on a mitzvah');
+    trackers.mitzvah = makeTracker('mitzvah', '', '', 'people have taken on a mitzvah');
     dash.appendChild(trackers.chai.el);
     dash.appendChild(trackers.mitzvah.el);
     if (moneyEl && moneyEl.parentNode) moneyEl.parentNode.insertBefore(dash, moneyEl.nextSibling);
@@ -334,15 +339,28 @@
     var own = el('button', { 'class': 'cmp-own', type: 'button', text: 'Have a different mitzvah in mind? Add your own' });
     own.addEventListener('click', function () { openMitzvahForm('Other', '', own); });
     var side = trackers.mitzvah.el;
-    side.classList.add('cmp-tracker--vertical');
-    $('.cmp-tracker-inner', side).classList.remove('container'); // Bootstrap's .container would size and center it over the cards
-    var section = el('div', { 'class': 'cmp-mitzvah cmp-injected' }, [el('div', { 'class': 'container' }, [
-      el('div', { 'class': 'cmp-mitzvah-title', text: 'Take on a mitzvah for the New Year' }),
+    $('.cmp-tracker-inner', side).classList.remove('container'); // Bootstrap's .container would size and center it
+    var picker = el('div', { 'class': 'cmp-mitzvah-picker', id: 'cmp-mitzvah-picker', hidden: '' }, [
       el('p', { 'class': 'cmp-mitzvah-lede', text: 'Choose a mitzvah in one of these categories or add your own.' }),
-      el('div', { 'class': 'cmp-mitzvah-body' }, [side, el('div', { 'class': 'cmp-options-wrap' }, [grid, own])])
+      el('div', { 'class': 'cmp-options-wrap' }, [grid, own])]);
+    var openBtn = el('button', { 'class': 'cmp-btn cmp-btn--primary cmp-mitzvah-open', type: 'button', 'aria-expanded': 'false', 'aria-controls': 'cmp-mitzvah-picker', text: 'Choose a mitzvah' });
+    openBtn.addEventListener('click', function () {
+      var open = openBtn.getAttribute('aria-expanded') === 'true';
+      openBtn.setAttribute('aria-expanded', String(!open));
+      openBtn.textContent = open ? 'Choose a mitzvah' : 'Close';
+      if (open) picker.setAttribute('hidden', ''); else picker.removeAttribute('hidden');
+    });
+    var section = el('div', { 'class': 'cmp-mitzvah cmp-injected' }, [el('div', { 'class': 'container' }, [
+      el('div', { 'class': 'cmp-mitzvah-head' }, [
+        el('div', { 'class': 'cmp-mitzvah-title', text: 'Take on a mitzvah for the New Year' }),
+        openBtn
+      ]),
+      side,
+      picker
     ])]);
     var wall = $(CONFIG.sel.wallSection, root);
-    if (wall && wall.parentNode) wall.parentNode.insertBefore(section, wall); else root.appendChild(section);
+    // After the donor list, so donors stay near the top of the page.
+    if (wall && wall.parentNode) wall.parentNode.insertBefore(section, wall.nextSibling); else root.appendChild(section);
   }
 
   // The Google Form opens in a lightbox on the page, mitzvah and path pre-selected when the field ids are set.
@@ -386,7 +404,29 @@
     ['input', 'change', 'keyup'].forEach(function (t) { fire(input, t); });
   }
   function isMonthly(form) { var r = $(CONFIG.sel.recurring, form); return !!(r && r.checked); }
-  function setMonthly(form, on) { var r = $(CONFIG.sel.recurring, form); if (r && r.checked !== on) r.click(); }
+  // The checkbox lives inside the platform's <sites-recurring-options> component, which may rebuild it after load.
+  // Query fresh every time, click it, and if that didn't take, set it directly and fire every event they might listen for.
+  function setMonthly(form, on) {
+    var r = $(CONFIG.sel.recurring, form);
+    if (!r || r.checked === on) return;
+    r.click();
+    if (r.checked !== on) {
+      r.checked = on;
+      ['click', 'input', 'change'].forEach(function (t) { fire(r, t); });
+    }
+    if (window.jQuery) { try { window.jQuery(r).trigger('change'); } catch (e) {} }
+    applyPlan(form);
+  }
+  // Keep the hidden plan fields in step with the checkbox (also when the donor ticks the platform's own box).
+  function applyPlan(form) {
+    var on = isMonthly(form), S = CONFIG.sel;
+    $$(S.planPayments, form).forEach(function (p) {
+      var want = on ? String(CONFIG.monthlyMonths) : '1';
+      if (p.value !== want) { p.value = want; fire(p, 'change'); }
+    });
+    var type = form.getAttribute('data-recurrence-type');
+    if (on && type) $$(S.planType, form).forEach(function (p) { if (!p.value) { p.value = type; fire(p, 'change'); } });
+  }
 
   function wireLightbox() {
     var S = CONFIG.sel;
@@ -408,7 +448,7 @@
       var monthly = el('button', { 'class': 'cmp-freq-opt', type: 'button', 'data-cmp-freq': 'monthly', 'aria-pressed': 'false' }, [
         'Give monthly', el('span', { 'class': 'cmp-freq-hint', text: 'Join the Chai Club' })]);
       wrap.parentNode.insertBefore(el('div', { 'class': 'cmp-freq cmp-injected', role: 'group', 'aria-label': 'How often' }, [once, monthly]), wrap);
-      wrap.classList.add('cmp-native-freq');
+      if (!CONFIG.showNativeRecurring) wrap.classList.add('cmp-native-freq');
       // Loud confirmation whenever monthly is on.
       submit.parentNode.insertBefore(el('div', { 'class': 'cmp-confirm cmp-injected', role: 'status', hidden: '' }), submit);
       syncForm(form);
@@ -432,14 +472,19 @@
     var btn = e.target.closest('.cmp-freq-opt');
     var form = e.target.closest(CONFIG.sel.form);
     if (btn && form) { setMonthly(form, btn.getAttribute('data-cmp-freq') === 'monthly'); syncForm(form); return; }
-    if (form) setTimeout(function () { syncForm(form); }, 0);
+    if (form) setTimeout(function () { applyPlan(form); syncForm(form); }, 0);
   });
   ['change', 'input'].forEach(function (t) {
-    document.addEventListener(t, function (e) { var f = e.target && e.target.closest ? e.target.closest(CONFIG.sel.form) : null; if (f) syncForm(f); });
+    document.addEventListener(t, function (e) { var f = e.target && e.target.closest ? e.target.closest(CONFIG.sel.form) : null; if (f) { applyPlan(f); syncForm(f); } });
   });
 
   // The nudge fires when the donor settles on a one-time amount — before any card details are typed —
   // never on the Donate click, which the platform uses for fraud checks and card tokenization.
+  // Right before the platform submits, make sure the plan fields are still in step with the checkbox.
+  document.addEventListener('submit', function (e) {
+    try { var f = e.target; if (f && f.matches && f.matches(CONFIG.sel.form)) applyPlan(f); } catch (err) {}
+  }, true);
+
   function maybeNudge(form) {
     if (nudgeFired || !form || isMonthly(form)) return;
     var amount = currentAmount(form), monthlyAmt = monthlyFor(amount);
